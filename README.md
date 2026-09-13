@@ -10,11 +10,11 @@ As soon as one of them is, the watcher:
 1. downloads the PDF into `downloads\`,
 2. sends a notification to your phone (through [ntfy](https://ntfy.sh)),
 3. shows a Windows notification and a popup that stays until you click it,
-4. stops checking that list, and keeps checking the others.
+4. stops for good: no more checks, for any list.
 
 It runs in the background with Windows Task Scheduler. Nothing to install on the PC, no window, and it keeps working after a reboot.
 
-It also tells you when it starts and stops: ✅ **FSTM watcher is running** after its first background check, and 🛑 **FSTM watcher stopped** when you uninstall it.
+It also tells you when it starts and stops: ✅ **FSTM watcher is running** after its first background check, and 🛑 **FSTM watcher stopped** when a list is found or when you uninstall it.
 
 ## How it knows the list is out
 
@@ -23,7 +23,7 @@ Each check sends one lightweight `HEAD` request to each URL:
 | Server answer | Meaning | What the script does |
 |---|---|---|
 | `404 Not Found` | Not published yet | Logs it, checks again in 10 minutes |
-| `200 OK` | A file is there | Downloads it, checks it really is a PDF (the file starts with `%PDF-`), then alerts you |
+| `200 OK` | A file is there | Downloads it, checks it really is a PDF (the file starts with `%PDF-`), alerts you, then stops the watcher |
 | Anything else, or no network | Server or connection problem | Logs it, checks again in 10 minutes |
 
 > **Why does my browser show `304 Not Modified` for a PDF that exists?** Your browser already has the file in its cache and asks "has it changed?". `304` means "no". The script never sends that question, so it always gets a real `200`.
@@ -65,7 +65,7 @@ Then:
    powershell.exe -ExecutionPolicy Bypass -File .\Watch-Pdf.ps1 -Url "https://www.fstm.ac.ma/formation_initiale/files/mst/concours_2026_2027/inscription/principale_SGE.pdf"
    ```
 
-   You should get all the alerts and find `downloads\principale_SGE.pdf`. This does not affect the lists you watch.
+   You should get all the alerts and find `downloads\principale_SGE.pdf`. This manual test does not stop the watcher and does not affect the lists you watch.
 
 Installer options:
 
@@ -114,7 +114,13 @@ The next check picks it up. No need to reinstall. To stop watching a list, remov
 
 ## After a list is found
 
-Each list is handled on its own. Once `downloads\<file>.pdf` exists, that URL is not checked any more and the other lists keep being checked. To watch a list again, delete its file. When you have all the lists, stop the scheduled task for good:
+The watcher stops as soon as one list is found: it removes its scheduled task and sends 🛑 **FSTM watcher stopped**. If several lists come out at the same time, they are all downloaded and alerted before it stops.
+
+To keep watching the other lists afterwards, remove the URL of the list you got from `config.json`, then run `Install-Watcher.ps1` again.
+
+## Stop the watcher yourself
+
+To stop it before a list comes out:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File .\Uninstall-Watcher.ps1
