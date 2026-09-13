@@ -14,6 +14,8 @@ As soon as one of them is, the watcher:
 
 It runs in the background with Windows Task Scheduler. Nothing to install on the PC, no window, and it keeps working after a reboot.
 
+It also tells you when it starts and stops: ✅ **FSTM watcher is running** after its first background check, and 🛑 **FSTM watcher stopped** when you uninstall it.
+
 ## How it knows the list is out
 
 Each check sends one lightweight `HEAD` request to each URL:
@@ -45,6 +47,8 @@ The installer:
 - creates `config.json` with a random, private ntfy topic,
 - registers a scheduled task named `FSTM-IASC-Watcher` (first check in 1 minute, then every 10 minutes),
 - prints the ntfy topic to subscribe to.
+
+About 1 minute after installing, the first background check sends ✅ **FSTM watcher is running** to your PC, and to your phone once you are subscribed. It proves the background checks really work.
 
 Then:
 
@@ -116,13 +120,15 @@ Each list is handled on its own. Once `downloads\<file>.pdf` exists, that URL is
 powershell.exe -ExecutionPolicy Bypass -File .\Uninstall-Watcher.ps1
 ```
 
+You get a 🛑 **FSTM watcher stopped** notification to confirm it.
+
 ## Files
 
 | File | Role |
 |---|---|
 | `Watch-Pdf.ps1` | Does one check. The scheduled task runs it every 10 minutes |
 | `Install-Watcher.ps1` | Creates `config.json` and the scheduled task |
-| `Uninstall-Watcher.ps1` | Removes the scheduled task |
+| `Uninstall-Watcher.ps1` | Removes the scheduled task and sends the "stopped" notification |
 | `run-hidden.vbs` | Starts the check without a window flashing |
 | `config.example.json` | Template for `config.json` (URLs to watch and ntfy topic) |
 | `config.json` | Your settings. **Not committed** |
@@ -165,7 +171,7 @@ This creates a new ntfy topic. To keep the one your phone already follows, copy 
 | Problem | Fix |
 |---|---|
 | `Access is denied` when running the installer | Your company may restrict Task Scheduler. Retry from a PowerShell window opened with **Run as administrator**, or ask your IT team. |
-| `logs\watcher.log` is still empty 10 minutes after installing | Windows Script Host is probably blocked. Reinstall with `-NoVbsLauncher`. |
+| No ✅ *FSTM watcher is running* notification and `logs\watcher.log` still empty a few minutes after installing | Windows Script Host is probably blocked. Reinstall with `-NoVbsLauncher`. |
 | No Windows notification | Focus Assist (Do Not Disturb) hides notifications. The popup still appears and the phone alert still arrives. |
 | Nothing arrives on the phone | Check that the topic in the app matches `ntfyTopic` in `config.json`, then run the `-TestNotification` command. |
 | `Toast skipped: it needs Windows PowerShell 5.1` in the log | The script was started with `pwsh`. Use `powershell.exe` as shown above. |
