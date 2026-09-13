@@ -21,7 +21,7 @@
 [CmdletBinding()]
 param(
     [ValidateRange(1, 1440)][int]$IntervalMinutes = 10,
-    [string]$TaskName = 'FSTM-IASC-Watcher',
+    [string]$TaskName = 'FSTM-IASC-Watcher',   # Watch-Pdf.ps1 removes the task by this name once a list is found
     [switch]$NoVbsLauncher
 )
 
@@ -51,9 +51,8 @@ $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
     -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) `
     -RepetitionDuration (New-TimeSpan -Days 365)
 # StartWhenAvailable: if the PC was off or asleep at a check time, run as soon as it is back.
-# Parallel: a run whose popup is still waiting for your click must not block the next checks.
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries `
-    -DontStopIfGoingOnBatteries -MultipleInstances Parallel
+    -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
 $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
 
@@ -69,6 +68,7 @@ New-Item -ItemType File -Force -Path (Join-Path $logDir 'start-pending') | Out-N
 $watchScript = Join-Path $Root 'Watch-Pdf.ps1'
 Write-Host ''
 Write-Host "Task '$TaskName' registered: first check in 1 minute, then every $IntervalMinutes minutes." -ForegroundColor Green
+Write-Host 'It stops by itself as soon as one list is found.'
 Write-Host 'Watching:'
 @($config.urls) | ForEach-Object { Write-Host "  $_" }
 Write-Host ''
