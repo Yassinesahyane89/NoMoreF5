@@ -12,6 +12,9 @@
     A downloaded PDF doubles as the "done" marker for its URL: while it exists in
     downloads\, that URL is not checked any more. Delete it to watch it again.
 
+    The first run after Install-Watcher.ps1 also sends a "watcher is running" notification,
+    and Uninstall-Watcher.ps1 uses -AnnounceStop to send a "watcher stopped" one.
+
 .PARAMETER Url
     Checks these URLs instead of the ones in config.json, e.g. to test with a list
     that is already online.
@@ -19,13 +22,17 @@
 .PARAMETER TestNotification
     Sends a test alert on every channel and exits, without checking any URL.
 
+.PARAMETER AnnounceStop
+    Sends the "watcher stopped" notification and exits, without checking any URL.
+
 .EXAMPLE
     powershell.exe -ExecutionPolicy Bypass -File .\Watch-Pdf.ps1 -TestNotification
 #>
 [CmdletBinding()]
 param(
     [string[]]$Url,
-    [switch]$TestNotification
+    [switch]$TestNotification,
+    [switch]$AnnounceStop
 )
 
 $ErrorActionPreference = 'Stop'
@@ -35,6 +42,7 @@ $ProgressPreference = 'SilentlyContinue'   # the progress bar slows downloads do
 $Root        = $PSScriptRoot
 $LogDir      = Join-Path $Root 'logs'
 $LogFile     = Join-Path $LogDir 'watcher.log'
+$StartMarker = Join-Path $LogDir 'start-pending'   # created by Install-Watcher.ps1
 $DownloadDir = Join-Path $Root 'downloads'
 $ConfigFile  = Join-Path $Root 'config.json'
 New-Item -ItemType Directory -Force -Path $LogDir, $DownloadDir | Out-Null
@@ -119,7 +127,7 @@ function Invoke-Check([string]$PdfUrl) {
     }
 }
 
-function Send-PhoneAlert([string]$Title, [string]$Message, [string]$ClickUrl) {
+function Send-PhoneAlert([string]$Title, [string]$Message, [string]$ClickUrl, [int]$Priority = 5, [string]$Tag = 'rotating_light') {
     $topic = [string]$Config.ntfyTopic
     if (-not $topic -or $topic -like '*CHANGE-ME*') {
         Write-Log 'Phone alert skipped: set ntfyTopic in config.json.'
@@ -129,12 +137,13 @@ function Send-PhoneAlert([string]$Title, [string]$Message, [string]$ClickUrl) {
         topic    = $topic
         title    = $Title
         message  = $Message
-        priority = 5                      # max: pop-over notification + long vibration
-        tags     = @('rotating_light')
-        click    = $ClickUrl              # tapping the notification opens the PDF
-    } | ConvertTo-Json
+        priority = $Priority              # 5 = max (pop-over + long vibration), 3 = normal
+        tags     = @($Tag)                # emoji shown next to the title
+    }
+    if ($ClickUrl) { $body.click = $ClickUrl }   # tapping the notification opens the PDF
+    $json = $body | ConvertTo-Json
     Invoke-WebRequest -Uri 'https://ntfy.sh' -Method Post -UseBasicParsing -TimeoutSec 30 `
-        -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body)) | Out-Null
+        -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($json)) | Out-Null
     Write-Log 'Phone alert sent.'
 }
 
@@ -147,20 +156,23 @@ function Show-Toast([string]$Title, [string]$Message, [string]$ClickUrl) {
     $null = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
     $t = [Security.SecurityElement]::Escape($Title)
     $m = [Security.SecurityElement]::Escape($Message)
-    $u = [Security.SecurityElement]::Escape($ClickUrl)
-    # scenario="reminder" keeps the toast on screen until you click it.
+    $sticky = ''
+    $actions = ''
+    if ($ClickUrl) {
+        # A list alert stays on screen until you click it, with a button to open the PDF.
+        $u = [Security.SecurityElement]::Escape($ClickUrl)
+        $sticky = " scenario=`"reminder`" activationType=`"protocol`" launch=`"$u`""
+        $actions = "<actions><action content=`"Open PDF`" activationType=`"protocol`" arguments=`"$u`"/><action content=`"`" activationType=`"system`" arguments=`"dismiss`"/></actions>"
+    }
     $xml = @"
-<toast scenario="reminder" activationType="protocol" launch="$u">
+<toast$sticky>
   <visual>
     <binding template="ToastGeneric">
       <text>$t</text>
       <text>$m</text>
     </binding>
   </visual>
-  <actions>
-    <action content="Open PDF" activationType="protocol" arguments="$u"/>
-    <action content="" activationType="system" arguments="dismiss"/>
-  </actions>
+  $actions
 </toast>
 "@
     $doc = [Windows.Data.Xml.Dom.XmlDocument]::new()
@@ -198,6 +210,13 @@ function Send-Alerts($Items) {
     }
 }
 
+function Send-Status([string]$Title, [string]$Message, [string]$Tag) {
+    # Watcher started/stopped: normal priority on the phone, a plain toast on the PC, no popup.
+    Write-Log $Title
+    try { Send-PhoneAlert -Title $Title -Message $Message -Priority 3 -Tag $Tag } catch { Write-Log "Phone alert failed: $($_.Exception.Message)" }
+    try { Show-Toast -Title $Title -Message $Message }                           catch { Write-Log "Toast failed: $($_.Exception.Message)" }
+}
+
 # --- Main ---------------------------------------------------------------------
 
 if (-not (Test-Path -LiteralPath $ConfigFile)) {
@@ -211,6 +230,13 @@ catch {
     Write-Log "config.json is not valid JSON, check its quotes and commas: $($_.Exception.Message)"
     exit 1
 }
+
+if ($AnnounceStop) {
+    Send-Status -Title 'FSTM watcher stopped' -Tag 'stop_sign' `
+        -Message 'The lists are no longer being checked. Run Install-Watcher.ps1 to start again.'
+    exit 0
+}
+
 $Urls = @($(if ($Url) { $Url } else { $Config.urls }) | Where-Object { $_ })
 if (-not $Urls) {
     Write-Log 'No URL to check: add them to "urls" in config.json.'
@@ -232,4 +258,13 @@ $found = foreach ($pdfUrl in $Urls) {
     try { Invoke-Check $pdfUrl }
     catch { Write-Log "Unexpected error on $pdfUrl, retrying next run: $($_.Exception.Message)" }
 }
+
+# First background run after Install-Watcher.ps1: proves the scheduled checks really work.
+# Manual test runs with -Url leave the marker alone.
+if (-not $Url -and (Test-Path -LiteralPath $StartMarker)) {
+    Remove-Item -LiteralPath $StartMarker -Force
+    Send-Status -Title 'FSTM watcher is running' -Tag 'white_check_mark' `
+        -Message "First background check done. Watching $($Urls.Count) list(s): you will be alerted as soon as one is published."
+}
+
 if ($found) { Send-Alerts $found }
