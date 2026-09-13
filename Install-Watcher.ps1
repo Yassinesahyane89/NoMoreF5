@@ -60,12 +60,19 @@ $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -Ru
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings `
     -Principal $principal -Description "Checks the FSTM list PDFs from config.json every $IntervalMinutes minutes." -Force | Out-Null
 
-# 3. What to do next
+# 3. The first scheduled check sends a "watcher is running" notification (see Watch-Pdf.ps1).
+$logDir = Join-Path $Root 'logs'
+New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+New-Item -ItemType File -Force -Path (Join-Path $logDir 'start-pending') | Out-Null
+
+# 4. What to do next
 $watchScript = Join-Path $Root 'Watch-Pdf.ps1'
 Write-Host ''
 Write-Host "Task '$TaskName' registered: first check in 1 minute, then every $IntervalMinutes minutes." -ForegroundColor Green
 Write-Host 'Watching:'
 @($config.urls) | ForEach-Object { Write-Host "  $_" }
+Write-Host ''
+Write-Host 'In about 1 minute you will get a "FSTM watcher is running" notification: it confirms the background checks work.'
 Write-Host ''
 if ($config.ntfyTopic -and $config.ntfyTopic -notlike '*CHANGE-ME*') {
     Write-Host 'Phone alerts:'
