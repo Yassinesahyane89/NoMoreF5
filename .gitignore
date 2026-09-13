@@ -1,0 +1,7 @@
+# Personal settings: holds your private ntfy topic
+config.json
+
+# Created at runtime
+logs/
+downloads/
+*.part
