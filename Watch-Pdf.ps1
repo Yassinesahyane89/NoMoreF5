@@ -1,23 +1,25 @@
 <#
 .SYNOPSIS
-    Checks once whether the FSTM list PDFs are online. For each new one: downloads it,
-    then alerts you on your phone (ntfy.sh), with a Windows toast and a popup.
+    Checks once whether the FSTM list PDFs are online. As soon as one is: downloads it,
+    alerts you on your phone (ntfy.sh), with a Windows toast and a popup, then stops the
+    watcher for good.
 
 .DESCRIPTION
     Meant to be run every 10 minutes by Task Scheduler (see Install-Watcher.ps1).
     Each run makes one HEAD request per URL listed in config.json:
       404            -> not published yet: log, next URL
-      200            -> download, check it really is a PDF, alert
+      200            -> download, check it really is a PDF
       other / error  -> log, next URL (the next run retries)
-    A downloaded PDF doubles as the "done" marker for its URL: while it exists in
-    downloads\, that URL is not checked any more. Delete it to watch it again.
+    If a list was found, the run alerts you, sends a "watcher stopped" notification and
+    removes the scheduled task: no check runs after that. As a safety net, while the PDF
+    of a watched URL exists in downloads\, runs exit straight away.
 
     The first run after Install-Watcher.ps1 also sends a "watcher is running" notification,
     and Uninstall-Watcher.ps1 uses -AnnounceStop to send a "watcher stopped" one.
 
 .PARAMETER Url
-    Checks these URLs instead of the ones in config.json, e.g. to test with a list
-    that is already online.
+    Checks these URLs instead of the ones in config.json, e.g. to test with a list that is
+    already online. Such manual runs never stop the watcher.
 
 .PARAMETER TestNotification
     Sends a test alert on every channel and exits, without checking any URL.
@@ -39,10 +41,11 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # the progress bar slows downloads down a lot in Windows PowerShell
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
+$TaskName    = 'FSTM-IASC-Watcher'                   # scheduled task created by Install-Watcher.ps1
 $Root        = $PSScriptRoot
 $LogDir      = Join-Path $Root 'logs'
 $LogFile     = Join-Path $LogDir 'watcher.log'
-$StartMarker = Join-Path $LogDir 'start-pending'   # created by Install-Watcher.ps1
+$StartMarker = Join-Path $LogDir 'start-pending'     # created by Install-Watcher.ps1
 $DownloadDir = Join-Path $Root 'downloads'
 $ConfigFile  = Join-Path $Root 'config.json'
 New-Item -ItemType Directory -Force -Path $LogDir, $DownloadDir | Out-Null
@@ -75,15 +78,15 @@ function Test-IsPdf([string]$Path) {
     return ($read -eq 5) -and ([Text.Encoding]::ASCII.GetString($header) -eq '%PDF-')
 }
 
+function Get-PdfPath([string]$PdfUrl) {
+    # Where the PDF of this URL is saved once found.
+    Join-Path $DownloadDir ([IO.Path]::GetFileName(([Uri]$PdfUrl).AbsolutePath))
+}
+
 function Invoke-Check([string]$PdfUrl) {
     # Checks one URL. Outputs an alert item if its PDF was just found, nothing otherwise.
-    $name   = [IO.Path]::GetFileName(([Uri]$PdfUrl).AbsolutePath)
-    $target = Join-Path $DownloadDir $name
-
-    if (Test-Path -LiteralPath $target) {
-        Write-Log "$name was already found and downloaded, nothing to do. Delete downloads\$name to watch it again."
-        return
-    }
+    $target = Get-PdfPath $PdfUrl
+    $name   = Split-Path $target -Leaf
 
     try {
         $status = Get-HttpStatus $PdfUrl
@@ -120,6 +123,7 @@ function Invoke-Check([string]$PdfUrl) {
     Write-Log "FOUND: $name is online, saved to $target"
 
     [pscustomobject]@{
+        Name    = $name
         Title   = "FSTM: $name is available!"
         Message = "The list is online. A copy was saved on your PC in downloads\$name."
         Url     = $PdfUrl
@@ -199,14 +203,17 @@ function Show-Popup([string]$Title, [string]$Message, [string]$PdfPath) {
 }
 
 function Send-Alerts($Items) {
-    # Each channel is independent so one failure does not block the others.
-    # Phone and toasts for every item first; popups last because each one waits for a click.
+    # Phone and toast for every item. Each channel is independent so one failure does not block the others.
     foreach ($item in $Items) {
         try { Send-PhoneAlert $item.Title $item.Message $item.Url } catch { Write-Log "Phone alert failed: $($_.Exception.Message)" }
         try { Show-Toast $item.Title $item.Message $item.Url }      catch { Write-Log "Toast failed: $($_.Exception.Message)" }
     }
+}
+
+function Show-Popups($Items) {
+    # Always called last: each popup waits for a click.
     foreach ($item in $Items) {
-        try { Show-Popup $item.Title $item.Message $item.Path }     catch { Write-Log "Popup failed: $($_.Exception.Message)" }
+        try { Show-Popup $item.Title $item.Message $item.Path } catch { Write-Log "Popup failed: $($_.Exception.Message)" }
     }
 }
 
@@ -215,6 +222,22 @@ function Send-Status([string]$Title, [string]$Message, [string]$Tag) {
     Write-Log $Title
     try { Send-PhoneAlert -Title $Title -Message $Message -Priority 3 -Tag $Tag } catch { Write-Log "Phone alert failed: $($_.Exception.Message)" }
     try { Show-Toast -Title $Title -Message $Message }                           catch { Write-Log "Toast failed: $($_.Exception.Message)" }
+}
+
+function Stop-Watcher([string]$Reason) {
+    # Announces the stop first, then removes the scheduled task so no check runs any more.
+    Send-Status -Title 'FSTM watcher stopped' -Tag 'stop_sign' `
+        -Message "$Reason No more checks will run. Run Install-Watcher.ps1 to start again."
+    Remove-Item -LiteralPath $StartMarker -Force -ErrorAction SilentlyContinue
+    try {
+        if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+            Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+            Write-Log "Scheduled task '$TaskName' removed."
+        }
+    }
+    catch {
+        Write-Log "Could not remove scheduled task '$TaskName', later runs will exit by themselves: $($_.Exception.Message)"
+    }
 }
 
 # --- Main ---------------------------------------------------------------------
@@ -242,21 +265,44 @@ if (-not $Urls) {
     Write-Log 'No URL to check: add them to "urls" in config.json.'
     exit 1
 }
+$invalid = @($Urls | Where-Object { -not [Uri]::IsWellFormedUriString($_, [UriKind]::Absolute) })
+if ($invalid) {
+    Write-Log "Invalid URL, fix it in config.json: $($invalid -join ', ')"
+    exit 1
+}
 
 if ($TestNotification) {
-    Send-Alerts ([pscustomobject]@{
+    $test = [pscustomobject]@{
         Title   = 'TEST - FSTM watcher'
         Message = 'Notifications work. You will get this alert when a list is published.'
         Url     = $Urls[0]
         Path    = ''
-    })
+    }
+    Send-Alerts $test
+    Show-Popups $test
     exit 0
 }
 
-# Check every URL before alerting, so a popup waiting for a click never delays a check.
-$found = foreach ($pdfUrl in $Urls) {
+# Safety net: a list found earlier means the job is done, even if the task could not be removed.
+$foundEarlier = @($Urls | Where-Object { Test-Path -LiteralPath (Get-PdfPath $_) })
+if ($foundEarlier) {
+    $name = Split-Path (Get-PdfPath $foundEarlier[0]) -Leaf
+    Write-Log "$name was already found, so the watcher is stopped. To watch again, delete downloads\$name or remove its URL from config.json, then run Install-Watcher.ps1."
+    exit 0
+}
+
+# Check every URL of this run first, so lists published at the same time are all downloaded and alerted.
+$found = @(foreach ($pdfUrl in $Urls) {
     try { Invoke-Check $pdfUrl }
     catch { Write-Log "Unexpected error on $pdfUrl, retrying next run: $($_.Exception.Message)" }
+})
+
+if ($found) {
+    Send-Alerts $found
+    if ($Url) { Write-Log 'Manual run with -Url: the watcher is not stopped.' }
+    else { Stop-Watcher -Reason "Found: $(@($found.Name) -join ', ')." }
+    Show-Popups $found
+    exit 0
 }
 
 # First background run after Install-Watcher.ps1: proves the scheduled checks really work.
@@ -266,5 +312,3 @@ if (-not $Url -and (Test-Path -LiteralPath $StartMarker)) {
     Send-Status -Title 'FSTM watcher is running' -Tag 'white_check_mark' `
         -Message "First background check done. Watching $($Urls.Count) list(s): you will be alerted as soon as one is published."
 }
-
-if ($found) { Send-Alerts $found }
